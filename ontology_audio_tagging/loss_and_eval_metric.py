@@ -1,62 +1,66 @@
-from sklearn import metrics
-import numpy
 import numpy as np
-import pickle
-
-from sklearn.covariance import graphical_lasso
-
 from tqdm import tqdm
 import os
 import warnings
 import sklearn
 import torch
 from numba import jit
-import logging
-import pickle
 from ontology_audio_tagging.utils import load_pickle, save_pickle
 from ontology_audio_tagging.audioset_graph_distance import get_audioset_graph_distance
 import torch.nn as nn
 
-GRAPH_WEIGHT=None
+GRAPH_WEIGHT = None
 
-def ontology_BCE(output, labels):
+
+def ontology_binary_cross_entropy(output, labels):
     epsilon = 1e-7
-    output = torch.clamp(output, epsilon, 1. - epsilon)
+    output = torch.clamp(output, epsilon, 1.0 - epsilon)
     loss = nn.BCELoss(reduction="none")(output, labels)
     loss_weight = ontology_loss_weight(labels)
     loss = (torch.mean(loss * loss_weight) + torch.mean(loss)) / 2
     return loss
 
+
 def ontology_loss_weight(target, beta=1):
     # Target: [132, 527]
     # GRAPH_WEIGHT: [527, 527]
     global GRAPH_WEIGHT
-    if(GRAPH_WEIGHT is None):
-        GRAPH_WEIGHT = torch.tensor(get_audioset_graph_distance(), requires_grad=False).float(); 
-        if(torch.cuda.is_available()): GRAPH_WEIGHT = GRAPH_WEIGHT.cuda()
-        GRAPH_WEIGHT = (GRAPH_WEIGHT/torch.max(GRAPH_WEIGHT))
-        
-    # Get the distance between each class and samples
-    graph_weight = GRAPH_WEIGHT ** beta
+
+    if GRAPH_WEIGHT is None:
+        GRAPH_WEIGHT = torch.tensor(
+            get_audioset_graph_distance(), requires_grad=False
+        ).float()
+        GRAPH_WEIGHT = GRAPH_WEIGHT / torch.max(GRAPH_WEIGHT)
+
+    GRAPH_WEIGHT = GRAPH_WEIGHT.to(target.device)
+    graph_weight = GRAPH_WEIGHT**beta
+
     weight = []
     for i in range(target.shape[0]):
-        res = target[i:i+1] * graph_weight
-        res[res == 0] = torch.inf # res==0 means the element is not in the target
+        res = target[i : i + 1] * graph_weight
+        res[res == 0] = torch.inf  # res==0 means the element is not in the target
         weight.append(torch.min(res, dim=1)[0].unsqueeze(0))
     weight = torch.cat(weight, dim=0)
-    
+
     # If the target only have one class, the weight on that class will be inf
-    weight[weight == torch.inf] = 0.0 
-    
+    weight[weight == torch.inf] = 0.0
+
     # Normalize the weight value
-    weight = weight/torch.max(weight, dim=1, keepdim=True)[0] 
+    weight = weight / torch.max(weight, dim=1, keepdim=True)[0]
     weight[target > 0] = 1.0
     weight = weight / torch.mean(weight)
     return weight
 
-def precision_recall_curve(y_true, probas_pred, *, pos_label=None, tps_weight=None, fps_weight=None):
+
+def precision_recall_curve(
+    y_true, probas_pred, *, pos_label=None, tps_weight=None, fps_weight=None
+):
     fps, tps, thresholds = _binary_clf_curve(
-        y_true, probas_pred, pos_label=pos_label, tps_weight=tps_weight, fps_weight=fps_weight
+        y_true,
+        probas_pred,
+        pos_label=pos_label,
+        tps_weight=tps_weight,
+        fps_weight=fps_weight,
     )
 
     ps = tps + fps
@@ -78,7 +82,9 @@ def precision_recall_curve(y_true, probas_pred, *, pos_label=None, tps_weight=No
     return np.hstack((precision[sl], 1)), np.hstack((recall[sl], 0)), thresholds[sl]
 
 
-def _binary_clf_curve(y_true, y_score, pos_label=None, tps_weight=None, fps_weight=None):
+def _binary_clf_curve(
+    y_true, y_score, pos_label=None, tps_weight=None, fps_weight=None
+):
     # Weight is the false positive re-weighting for each sample (18k+)
     # Original label: speech; Pred label: speech, conversation, male speech; What is the false positive weight when we calculate the class 'conversation'?
 
@@ -97,9 +103,7 @@ def _binary_clf_curve(y_true, y_score, pos_label=None, tps_weight=None, fps_weig
     # Filter out zero-weighted samples, as they should not impact the result
     if fps_weight is not None:
         fps_weight = sklearn.utils.column_or_1d(fps_weight)
-        fps_weight = sklearn.utils.validation._check_sample_weight(
-            fps_weight, y_true
-        )
+        fps_weight = sklearn.utils.validation._check_sample_weight(fps_weight, y_true)
         # nonzero_weight_mask = sample_weight != 0
         # y_true = y_true[nonzero_weight_mask]
         # y_score = y_score[nonzero_weight_mask]
@@ -108,9 +112,7 @@ def _binary_clf_curve(y_true, y_score, pos_label=None, tps_weight=None, fps_weig
     # Filter out zero-weighted samples, as they should not impact the result
     if tps_weight is not None:
         tps_weight = sklearn.utils.column_or_1d(tps_weight)
-        tps_weight = sklearn.utils.validation._check_sample_weight(
-            tps_weight, y_true
-        )
+        tps_weight = sklearn.utils.validation._check_sample_weight(tps_weight, y_true)
         # nonzero_weight_mask = sample_weight != 0
         # y_true = y_true[nonzero_weight_mask]
         # y_score = y_score[nonzero_weight_mask]
@@ -118,8 +120,8 @@ def _binary_clf_curve(y_true, y_score, pos_label=None, tps_weight=None, fps_weig
     pos_label = sklearn.metrics._ranking._check_pos_label_consistency(pos_label, y_true)
 
     # make y_true a boolean vector
-    if(tps_weight is None):
-        y_true = y_true == pos_label # y_true stand for if the sample is positive
+    if tps_weight is None:
+        y_true = y_true == pos_label  # y_true stand for if the sample is positive
     else:
         # y_true[y_true==0] = tps_weight[y_true==0]
         y_true = tps_weight
@@ -153,6 +155,7 @@ def _binary_clf_curve(y_true, y_score, pos_label=None, tps_weight=None, fps_weig
         fps = 1 + threshold_idxs - tps
     return fps, tps, y_score[threshold_idxs]
 
+
 def _average_precision(y_true, pred_scores, tps_weight=None, fps_weight=None):
     precisions, recalls, thresholds = precision_recall_curve(
         y_true, pred_scores, tps_weight=tps_weight, fps_weight=fps_weight
@@ -162,67 +165,94 @@ def _average_precision(y_true, pred_scores, tps_weight=None, fps_weight=None):
     AP = numpy.sum((recalls[:-1] - recalls[1:]) * precisions[:-1])
     return AP
 
+
 def initialize_weight(graph_weight_path):
     # print("Normalize graph connectivity weight by the max value.")
-    weight = np.load(
-        graph_weight_path
-    )   
+    weight = np.load(graph_weight_path)
     return weight
+
 
 def mask_weight(weight, threshold=1.0):
     # ones_matrix = np.ones_like(weight)
     ones_matrix = weight.copy()
     ones_matrix[weight <= threshold] *= 0
     diag = np.eye(ones_matrix.shape[0]) == 1
-    if(np.mean(ones_matrix[~diag]) > 1e-9):
+    if np.mean(ones_matrix[~diag]) > 1e-9:
         ones_matrix = ones_matrix / np.mean(ones_matrix[~diag])
     return ones_matrix
+
 
 @jit(nopython=True)
 def build_ontology_fps_sample_weight_min(target, weight, class_idx):
     ret = []
     for i in range(target.shape[0]):
         positive_indices = np.where(target[i] == 1)[0]
-        assert np.sum(positive_indices) > 0, "the %d-th sample in the evaluation set do not have positive label" % i
+        assert np.sum(positive_indices) > 0, (
+            "the %d-th sample in the evaluation set do not have positive label" % i
+        )
         minimum_distance_with_class_idx = np.min(weight[positive_indices][:, class_idx])
         ret.append(minimum_distance_with_class_idx)
     return ret
 
+
 def build_weight(target, weight, refresh=False):
     ret = {}
     path = "ontology_weight.pkl.tmp"
-    if(refresh or not os.path.exists(path)):
+    if refresh or not os.path.exists(path):
         print("Build ontology based metric weight")
-        logging.info("Build ontology based metric weight")
-        for threshold in tqdm(np.linspace(0, int(np.max(weight)), int(np.max(weight))+1)):
+        for threshold in tqdm(
+            np.linspace(0, int(np.max(weight)), int(np.max(weight)) + 1)
+        ):
             ret[threshold] = {}
             masked = mask_weight(weight, threshold)
             for i in range(target.shape[1]):
-                ret[threshold][i] = build_ontology_fps_sample_weight_min(target, masked, i)
-        save_pickle(ret, path)       
+                ret[threshold][i] = build_ontology_fps_sample_weight_min(
+                    target, masked, i
+                )
+        save_pickle(ret, path)
     else:
         ret = load_pickle(path)
     return ret
-            
+
+
 def ontology_mean_average_precision(target, clipwise_output):
     graph_node_distance = get_audioset_graph_distance()
     ontology_weight = build_weight(target, graph_node_distance)
-    ret_fps_ap = {}
-    
-    while(True):
+
+    omap_on_different_coarse_level_details = {}
+
+    while True:
         try:
-            for threshold in tqdm(np.linspace(0, int(np.max(graph_node_distance)), int(np.max(graph_node_distance))+1)):
-                fps_ap=[]
+            for threshold in tqdm(
+                np.linspace(
+                    0,
+                    int(np.max(graph_node_distance)),
+                    int(np.max(graph_node_distance)) + 1,
+                )
+            ):
+                fps_ap = []
                 for i in range(target.shape[1]):
                     fps_weight = ontology_weight[threshold][i]
                     fps_ap.append(
                         _average_precision(
-                            target[:, i], clipwise_output[:, i], tps_weight=None, fps_weight=fps_weight
+                            target[:, i],
+                            clipwise_output[:, i],
+                            tps_weight=None,
+                            fps_weight=fps_weight,
                         )
-                    )   
-                ret_fps_ap[threshold] = np.array(fps_ap)
+                    )
+                omap_on_different_coarse_level_details[threshold] = np.array(fps_ap)
             break
-        except: 
+        except:
             ontology_weight = build_weight(target, graph_node_distance, refresh=True)
-            
-    return ret_fps_ap
+
+    omap_on_different_coarse_level = {
+        k: np.mean(v) for k, v in omap_on_different_coarse_level_details.items()
+    }
+    omap_average = np.mean([v for k, v in omap_on_different_coarse_level.items()])
+
+    return (
+        omap_average,
+        omap_on_different_coarse_level,
+        omap_on_different_coarse_level_details,
+    )
